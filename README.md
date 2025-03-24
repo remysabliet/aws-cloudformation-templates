@@ -1,4 +1,4 @@
-A collection of AWS CloudFormation templates for various use cases.
+📦 A collection of AWS CloudFormation Templates mades by Rémy SABLIET (remysab)
 
 ## Available Templates
 
