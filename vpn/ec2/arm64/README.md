@@ -76,13 +76,13 @@ Specifies the parameters required by the CloudFormation template:
   - /32 for IPv4 (single IP address)
   - /128 for IPv6 (single IP address)
 
-✅ Correct:
-85.203.80.129/32
-2a01:e34:abcd:5678::1/128
+  ✅ Correct:
+    - 85.203.80.129/32
+    - 2a01:e34:abcd:5678::1/128
 
-❌ Incorrect (missing CIDR):
-85.203.80.129
-2a01:e34:abcd:5678::1
+  ❌ Incorrect (missing CIDR):
+    - 85.203.80.129
+    - 2a01:e34:abcd:5678::1
 
 💡 Why IPv4 and IPv6 are optional:
 If you don’t specify them, the stack will open the VPN and SSH ports to all IPs by default (0.0.0.0/0, ::/0).
