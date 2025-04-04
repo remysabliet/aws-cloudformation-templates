@@ -12,8 +12,8 @@ You can deploy the VPN stack using AWS CLI. This command launches a VPN server E
 ```bash
 aws cloudformation create-stack \
   --region <your-server-region> \
-  --stack-name vpn-ec2-arm64 \
-  --template-body file://wireguard-ec2-vpn-arm64.yaml \
+  --stack-name vpn-ec2-x86_64 \
+  --template-body file://wireguard-ec2-vpn-x86_64.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameters \
     ParameterKey=Password,ParameterValue=<your-ssh-password> \
@@ -32,10 +32,10 @@ You can add one or both of these to limit VPN access to your own public IP(s):
 
 *Specifies the AWS region where the stack will be created. Choose a region where you want to leverage an IP from. For a list of available AWS regions and their codes, refer to the AWS Regional Services List.*
 
-``--stack-name vpn-ec2-arm64``: Mandatory
+``--stack-name vpn-ec2-x86_64``: Mandatory
 Defines the name of the CloudFormation stack. Replace vpn-ec2-arm64 with your preferred stack name.
 
-``--template-body`` file://wireguard-ec2-vpn-arm64.yaml: Mandatory
+``--template-body`` file://wireguard-ec2-vpn-x86_64.yaml: Mandatory
 Points to the CloudFormation template file. Ensure the path is correct and the file exists.
 
 ``--capabilities CAPABILITY_NAMED_IAM``: Mandatory
