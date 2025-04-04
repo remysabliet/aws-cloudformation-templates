@@ -1,0 +1,323 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  EC2 instance running VPN (WireGuard) with SSH access using password authentication
+  and WireGuard UDP access (IPv4 and/or IPv6).
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    Description: EC2 Instance type for the VPN server (default is t2.micro)
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+      - t3.small
+      - c5n.large
+    ConstraintDescription: Must be a valid EC2 instance type.
+
+  AMIId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+    Description: Latest Ubuntu 22.04 LTS x86_64 AMI (official Canonical image via SSM)
+
+  IPv4Address:
+    Type: String
+    Default: ""
+    Description: >
+      The IPv4 address or range (e.g., 0.0.0.0/0 for open access). Leave empty to disable IPv4 access.
+    ConstraintDescription: Must be a valid IPv4 CIDR (e.g., 203.0.113.0/32) or empty.
+
+  IPv6Address:
+    Type: String
+    Default: ""
+    Description: >
+      The IPv6 address or range (e.g., ::/0 for open access). Leave empty to disable IPv6 access.
+    ConstraintDescription: Must be a valid IPv6 CIDR or empty.
+
+  Password:
+    Type: String
+    NoEcho: true
+    Description: The password for the VPN SSH user
+    MinLength: "6"
+    MaxLength: "32"
+
+  ClientPublicKey:
+    Type: String
+    Description: >
+      The WireGuard public key for the client (to be added as a peer with IP 10.0.1.2/32).
+
+Conditions:
+  HasIPv4: !Not [!Equals [!Ref IPv4Address, ""]]
+  HasIPv6: !Not [!Equals [!Ref IPv6Address, ""]]
+  NoIPProvided: !And [!Not [!Condition HasIPv4], !Not [!Condition HasIPv6]]
+  UseIPv4: !Or [!Condition HasIPv4, !Condition NoIPProvided]
+  UseIPv6: !Or [!Condition HasIPv6, !Condition NoIPProvided]
+
+Resources:
+  VPNVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+
+  VPNVPCIpv6Block:
+    Type: "AWS::EC2::VPCCidrBlock"
+    Condition: UseIPv6
+    DeletionPolicy: Retain
+    Properties:
+      VpcId: !Ref VPNVPC
+      AmazonProvidedIpv6CidrBlock: true
+
+  VPNPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPNVPC
+      CidrBlock: "10.0.1.0/24"
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: !If [UseIPv4, true, false]
+      AssignIpv6AddressOnCreation: !If [UseIPv6, true, !Ref AWS::NoValue]
+      Ipv6CidrBlock: !If [UseIPv6, !Select [0, !GetAtt VPNVPC.Ipv6CidrBlocks], !Ref AWS::NoValue]
+
+  Ipv6BlockDeleterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import boto3
+          import time
+
+          def handler(event, context):
+              ec2 = boto3.client('ec2')
+
+              vpc_cidr_block_id = event['ResourceProperties']['VpcCidrBlockId']
+              subnet_id = event['ResourceProperties']['SubnetId']
+
+              if event['RequestType'] == 'Delete':
+                  # Wait for subnet deletion
+                  while True:
+                      try:
+                          ec2.describe_subnets(SubnetIds=[subnet_id])
+                          print("Waiting for subnet deletion...")
+                          time.sleep(10)  # Retry after a delay
+                      except ec2.exceptions.InvalidSubnetIDNotFound:
+                          print("Subnet deleted.")
+                          break
+
+                  # Manually remove IPv6 block since CloudFormation retains it
+                  ec2.disassociate_vpc_cidr_block(AssociationId=vpc_cidr_block_id)
+                  print("IPv6 CIDR Block deleted.")
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda-ec2-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DisassociateVpcCidrBlock
+                  - ec2:DescribeSubnets
+                Resource: "*"
+
+  VPNRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref VPNPublicSubnet
+      RouteTableId: !Ref VPNRouteTable
+
+  VPNInternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPNVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPNVPC
+      InternetGatewayId: !Ref VPNInternetGateway
+
+  VPNRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPNVPC
+
+  VPNDefaultRouteIPv4:
+    Type: AWS::EC2::Route
+    Condition: UseIPv4
+    Properties:
+      RouteTableId: !Ref VPNRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref VPNInternetGateway
+
+  VPNDefaultRouteIPv6:
+    Type: AWS::EC2::Route
+    Condition: UseIPv6
+    Properties:
+      RouteTableId: !Ref VPNRouteTable
+      DestinationIpv6CidrBlock: "::/0"
+      GatewayId: !Ref VPNInternetGateway
+
+  VPNInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow SSH, WireGuard, and ICMP access"
+      VpcId: !Ref VPNVPC
+
+  # --- IPv4 SecurityGroupIngress Rules ---
+  VPNIngressIPv4TCP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseIPv4
+    DependsOn: VPNInstanceSecurityGroup
+    Properties:
+      GroupId: !Ref VPNInstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !If [HasIPv4, !Ref IPv4Address, "0.0.0.0/0"]
+
+  VPNIngressIPv4UDP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseIPv4
+    DependsOn: VPNInstanceSecurityGroup
+    Properties:
+      GroupId: !Ref VPNInstanceSecurityGroup
+      IpProtocol: udp
+      FromPort: 51820
+      ToPort: 51820
+      CidrIp: !If [HasIPv4, !Ref IPv4Address, "0.0.0.0/0"]
+
+  VPNIngressIPv4ICMP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseIPv4
+    DependsOn: VPNInstanceSecurityGroup
+    Properties:
+      GroupId: !Ref VPNInstanceSecurityGroup
+      IpProtocol: icmp
+      FromPort: -1
+      ToPort: -1
+      CidrIp: !If [HasIPv4, !Ref IPv4Address, "0.0.0.0/0"]
+
+  # --- IPv6 SecurityGroupIngress Rules ---
+  VPNIngressIPv6TCP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseIPv6
+    DependsOn: VPNInstanceSecurityGroup
+    Properties:
+      GroupId: !Ref VPNInstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIpv6: !If [HasIPv6, !Ref IPv6Address, "::/0"]
+
+  VPNIngressIPv6UDP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseIPv6
+    DependsOn: VPNInstanceSecurityGroup
+    Properties:
+      GroupId: !Ref VPNInstanceSecurityGroup
+      IpProtocol: udp
+      FromPort: 51820
+      ToPort: 51820
+      CidrIpv6: !If [HasIPv6, !Ref IPv6Address, "::/0"]
+
+  VPNIngressIPv6ICMP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseIPv6
+    DependsOn: VPNInstanceSecurityGroup
+    Properties:
+      GroupId: !Ref VPNInstanceSecurityGroup
+      IpProtocol: "58"
+      FromPort: -1
+      ToPort: -1
+      CidrIpv6: !If [HasIPv6, !Ref IPv6Address, "::/0"]
+
+  VPNInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AMIId
+      SubnetId: !Ref VPNPublicSubnet
+      SecurityGroupIds:
+        - !Ref VPNInstanceSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #cloud-config
+          users:
+            - default
+            - name: vpnuser
+              groups: sudo
+              shell: /bin/bash
+              sudo: ['ALL=(ALL) NOPASSWD:ALL']
+              lock_passwd: false
+              plain_text_passwd: "${Password}"
+          ssh_pwauth: true
+          write_files:
+            - path: /etc/ssh/sshd_config.d/99-enable-password-auth.conf
+              permissions: '0644'
+              owner: root:root
+              content: |
+                PasswordAuthentication yes
+                ChallengeResponseAuthentication no
+                PermitRootLogin no
+          runcmd:
+            - sysctl -w net.ipv4.ip_forward=1
+            - sysctl -w net.ipv6.conf.all.forwarding=1
+            - sysctl --system
+            - systemctl restart sshd
+            - iptables -t nat -A POSTROUTING -o $(ip route get 1.1.1.1 | awk '{print $5; exit}') -s 10.0.1.0/24 -j MASQUERADE
+            - apt-get update -y
+            - apt-get install -y wireguard
+            - mkdir -p /etc/wireguard
+            - PRIVATE_KEY=$(wg genkey)
+            - echo "$PRIVATE_KEY" | wg pubkey > /etc/wireguard/publickey
+            - echo "[Interface]" > /etc/wireguard/wg0.conf
+            - echo "Address = 10.0.1.1/24" >> /etc/wireguard/wg0.conf
+            - echo "ListenPort = 51820" >> /etc/wireguard/wg0.conf
+            - echo "PrivateKey = $PRIVATE_KEY" >> /etc/wireguard/wg0.conf
+            - echo "MTU = 1280" >> /etc/wireguard/wg0.conf
+            - echo "" >> /etc/wireguard/wg0.conf
+            - echo "[Peer]" >> /etc/wireguard/wg0.conf
+            - echo "PublicKey = ${ClientPublicKey}" >> /etc/wireguard/wg0.conf
+            - echo "AllowedIPs = 10.0.1.2/32" >> /etc/wireguard/wg0.conf
+            - systemctl enable wg-quick@wg0
+            - wg-quick up wg0
+
+Outputs:
+  VPNInstancePublicIPIPv4:
+    Condition: UseIPv4
+    Description: "Public IPv4 of the EC2 instance"
+    Value: !GetAtt VPNInstance.PublicIp
+    Export:
+      Name: !Sub "${AWS::StackName}-VPNInstancePublicIPv4"
+
+  VPNInstancePublicIPIPv6:
+    Condition: UseIPv6
+    Description: "Public IPv6 of the EC2 instance (retrieve manually)"
+    Value: "SSH into the instance and run: ip -6 addr show"
+    Export:
+      Name: !Sub "${AWS::StackName}-VPNInstancePublicIPv6"
+
+  VPNInstancePublicDNS:
+    Condition: UseIPv4
+    Description: "Public DNS name of the EC2 instance (IPv4)"
+    Value: !GetAtt VPNInstance.PublicDnsName
+
+  VPNInstancePublicDNSIPv6:
+    Condition: UseIPv6
+    Description: "Public DNS (resolve manually via IPv6)"
+    Value: !Sub "Set AAAA record to ${AWS::StackName}-VPNInstancePublicIPv6"
+
+  WireGuardServerPublicKey:
+    Description: "WireGuard server public key"
+    Value: !Sub "Use SSH to connect and run: sudo cat /etc/wireguard/publickey"
