@@ -201,3 +201,39 @@ From your EC2 instance, run:
 ```
 ✅ If successful, your server can reach the internet.
 
+## 🪟 Windows WireGuard Setup & Troubleshooting
+✅ Recommended Configuration (Client)
+Use the following WireGuard configuration file as a base. Replace the placeholder values with your actual server details:
+```ini 
+[Interface]
+PrivateKey = <client-private-key>
+Address = 10.0.1.2/32
+DNS = 1.1.1.1
+MTU = 1420
+
+[Peer]
+PublicKey = <wg-server-public-key>
+AllowedIPs = 0.0.0.0/1, 128.0.0.0/1
+Endpoint = <ec2-instance-ip>:51820
+PersistentKeepalive = 25
+```
+The AllowedIPs = 0.0.0.0/1, 128.0.0.0/1 trick routes all internet traffic through the tunnel while excluding the VPN server’s public IP, so the connection stays alive.
+
+🧩 Important Notes for Windows Users
+### Run WireGuard as Administrator
+Right-click on the WireGuard shortcut and select "Run as administrator". This is required so the app can set routes and network permissions correctly.
+
+### Uncheck "Block untunneled traffic"
+In the WireGuard UI, make sure the option "Block untunneled traffic (kill-switch)" is unchecked unless you know what you're doing.
+
+If enabled too early, it can prevent the VPN connection from being established.
+
+### No Handshake? Check Firewall & Permissions
+If wg shows latest handshake: never, the client can't reach the server. Check:
+
+  - That you’re using the correct public key and IP.
+  - Windows Firewall or other security software isn't blocking UDP 51820.
+  - You’ve run the app with administrative privileges.
+
+### Don’t worry about blank adapter IPs in the UI
+The WireGuard interface in "Network Connections" may show empty fields for IPv4 configuration — this is normal. WireGuard configures routes internally, not through the Windows UI.
